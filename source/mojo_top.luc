@@ -1,0 +1,945 @@
+module mojo_top (
+    input clk,              // 50MHz clock
+    input rst_n,            // reset button (active low)
+    output led [8],         // 8 user controllable LEDs
+    input cclk,             // configuration clock, AVR ready when high
+    output spi_miso,        // AVR SPI MISO
+    input spi_ss,           // AVR SPI Slave Select
+    input spi_mosi,         // AVR SPI MOSI
+    input spi_sck,          // AVR SPI Clock
+    output spi_channel [4], // AVR general purpose pins (used by default to select ADC channel)
+    input avr_tx,           // AVR TX (FPGA RX)
+    output avr_rx,          // AVR RX (FPGA TX)
+    input avr_rx_busy,       // AVR RX buffer full
+    input io_dip[3][8],    // Switches on IO Shield, 3*8 array
+    output io_led [3][8],   // LEDs on IO Shield, 3*8 array
+    input io_button[5],    // Buttons on IO Shield, 5 in total
+    output io_seg [8],      // 7-segment LEDs on IO Shield
+    output io_sel [4]      // Digit select on IO Shield
+  ) {
+  
+  sig rst;                  // reset signal
+  sig aluoutput[8];
+  const DELAY = 28;
+  const CONTINUE = 0;
+  const COUNTERBIT = 29;
+  
+  .clk(clk) {
+    // The reset conditioner is used to synchronize the reset signal to the FPGA
+    // clock. This ensures the entire FPGA comes out of reset at the same time.
+    reset_conditioner reset_cond;
+   .rst(rst) {
+      fsm state ={STATEZERO,ADDER,BOOLEAN,SHIFTER,CMP,      //initial state and states for manual testing of the 4 modules of ALU
+      A_ADD,A_ADDOVF,A_SUB,A_MULT,A_ZERO,A_ERRTEST,A_ERR,   //adder test cases for automatic testing
+      B_NONE,B_NOR,B_ANOTB,B_NOTB,B_BNOTA,B_NOTA,B_XOR,B_NAND,B_AND,B_XNOR,B_A,B_AORNB,B_B,B_BORNA,B_OR,B_ALL,B_ERRTEST,B_ERR,   //boolean test cases for automatic testing
+      S_SL,S_SR,S_SRA,S_ERRTEST,S_ERR,   //shifter test cases for automatic testing
+      C_EQ,C_EQF,C_LT,C_LTF,C_LTEQE,C_LTEQL,C_LTEQF,C_ERRTEST,C_ERR};    //comparator test cases for automatic testing
+      dff counter[COUNTERBIT];          // d flip-flop 29 bits wide
+      multi_seven_seg seg;      // multi_seven_seg module named seg initialised
+    }
+  }
+  
+  alu8bit myalu;              // instance of alu8bit
+  
+  always {
+    reset_cond.in = ~rst_n; // input raw inverted reset signal
+    rst = reset_cond.out;   // conditioned reset
+    
+    led = 8h00;             // turn LEDs off
+    spi_miso = bz;          // not using SPI
+    spi_channel = bzzzz;    // not using flags
+    avr_rx = bz;            // not using serial port
+    
+    io_led = 3x{{8h00}};    // turn all io_led off
+    seg.values = {4b1101,4b1101,4b1101,4b1101}; //switch off all io_seg
+    io_seg = ~seg.seg; // connect segments to the driver
+    io_sel = ~seg.sel; // connect digit select to the driver
+    
+    myalu.a = 2h00;
+    myalu.b = 2h00;
+    myalu.alufn = 6b000000;
+    
+    case(state.q){     // cases of state.q
+      state.STATEZERO:     //initial state is when all io_led are off, counter.d is low and io_seg is off.
+        io_led = 3x{{8h00}}; 
+        counter.d = 0;
+        seg.values = {4b1101,4b1101,4b1101,4b1101};      //switch off all 7-seg displays
+        if (io_button[0]==1){           //when io_button[0], which is the top button is pressed, state will move to ADDER manual testing
+          state.d = state.ADDER;
+        }
+        if (io_button[3]==1){           //when io_button[3], which is the left button is pressed, state will move to BOOLEAN manual testing
+          state.d = state.BOOLEAN;
+        }
+        if (io_button[2]==1){           //when io_button[2], which is the bottom button is pressed, state will move to SHIFTER manual testing
+          state.d = state.SHIFTER;
+        }
+        if (io_button[4]==1){           //when io_button[4], which is the right button is pressed, state will move to COMPARATOR manual testing
+          state.d = state.CMP;
+        }
+        if (io_button[1]==1){           //when io_button[1], which is the center button is pressed, state will move to automatic testing
+          state.d = state.A_ADD;
+        }
+        
+      state.ADDER:                      //Manual testing for Adder
+        myalu.a = io_dip[2];            //inputs using the dip switches(a,b and alufn)
+        myalu.b = io_dip[1];
+        myalu.alufn = io_dip[0][5:0];
+        io_led[0] = myalu.out;          //assigns outputs to the different led arrays on the ioshield
+        io_led[1][0] = myalu.n;
+        io_led[1][1] = myalu.v;
+        io_led[1][2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1010};    //displays the letter A on the most right 7-seg display to show that the adder module is running
+        
+        counter.d = counter.q + 1;              //start counter
+        if (counter.q[DELAY]==1 && io_dip[0][5:4]==2b00){      //once the MSB of counter becomes 1 and the alufn is checked to be for adder
+          counter.d = 0;                        //reset the counter
+          state.d = state.STATEZERO;            //transition back to the initial state
+        }
+        else if (io_dip[0][5:4]!= 2b00){          //if alufn is not correct
+          io_led = 3x{{8h00}}; 
+          seg.values = {4b1100,4b1110,4b1110,4b1010};       //display ERRA on the 7-seg display to signify error
+          if (counter.q[DELAY]==1){            //once the MSB becomes 1
+            counter.d=0;                       //resets counter
+            state.d=state.STATEZERO;           //transition back to initial state
+          }
+        }
+        
+      state.BOOLEAN:                              //Manual testing for Boolean
+        myalu.a = io_dip[2];                      //inputs using the dip switches(a,b and alufn)
+        myalu.b = io_dip[1];
+        myalu.alufn = io_dip[0][5:0];
+        io_led[0] = myalu.out;                    //assign output
+        seg.values = {4b1101,4b1101,4b1101,4b1000};      //display B on the 7-seg display
+        
+        counter.d = counter.q + 1;                        //rest of the code is same as the manual testing for Adder
+        if (counter.q[DELAY]==1 && io_dip[0][5:4]==2b01){
+          counter.d = 0;
+          state.d = state.STATEZERO;
+        }
+        else if (io_dip[0][5:4]!= 2b01){
+          seg.values = {4b1100,4b1110,4b1110,4b1000}; 
+          if (counter.q[DELAY]==1){
+            counter.d=0;
+            state.d=state.STATEZERO;
+          }
+        }
+        
+      state.SHIFTER:                                //manual testing for Shifter
+        myalu.a = io_dip[2];                        //rest of code is same as manual testing for adder, except for display on 7-seg display
+        myalu.b = io_dip[1];
+        myalu.alufn = io_dip[0][5:0];
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b0101}; 
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && io_dip[0][5:4]==2b10){
+          counter.d = 0;
+          state.d = state.STATEZERO;
+        }
+        else if (io_dip[0][5:4]!= 2b10){
+          seg.values = {4b1100,4b1110,4b1110,4b0101};
+          if (counter.q[DELAY]==1){
+            counter.d=0;
+            state.d=state.STATEZERO;
+          }
+        }
+        
+      state.CMP:                                    //manual testing for comparator
+        myalu.a = io_dip[2];                        //rest of the code is same as manual testing for Adder except the 7-seg display
+        myalu.b = io_dip[1];
+        myalu.alufn = io_dip[0][5:0];
+        io_led[0] = myalu.out;
+        io_led[1][0] = myalu.n;
+        io_led[1][1] = myalu.v;
+        io_led[1][2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && io_dip[0][5:4]==2b11){
+          counter.d = 0;
+          state.d = state.STATEZERO;
+        }
+        else if (io_dip[0][5:4]!= 2b11){
+          seg.values = {4b1100,4b1110,4b1110,4b1011};
+          if (counter.q[DELAY]==1){
+            counter.d=0;
+            state.d=state.STATEZERO;
+          }
+        } 
+        
+      state.A_ADD:                                  //Automatic testing:Addition
+        myalu.a = 8b100;  //4+6=10, hardcoded the inputs 
+        myalu.b = 8b110;
+        myalu.alufn = 6b0;
+        aluoutput = myalu.out;       //assign the output of the ALU unit to the singal aluoutput 
+        io_led[2] = 8b100;           //displays the inputs on the ioled arrays
+        io_led[1] = 8b110;
+        io_led[0] = myalu.out;       //displays the output on the first array of the ioled arrays
+        led[0] = myalu.n;            //displays z,v and n on the leds of the MOJO board(not IO shield due to lack of leds)
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1010};      //displays A on the 7-seg display to indicate adder testing
+        
+        counter.d = counter.q + 1;          //starts counter
+        if (counter.q[DELAY]==1 && aluoutput==8b1010 && io_button[1]==CONTINUE){ //if the MSB of counter is 1 and output is correct output.io_button[1]==CONTINUE is used for debugging purposes when testing the code so that only when pressing the button the state will go to the next state
+          counter.d = 0;                  //reset counter
+          state.d = state.A_ADDOVF;        //transition to the next test case
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b1010 && io_button[1]==CONTINUE){ //if output is not the expected output
+          counter.d=0;                      //reset counter
+          state.d=state.A_ERR;                //go to error state
+        }
+      
+      state.A_ADDOVF:                //Addition overflow test and negative number test
+        myalu.a = 8b01000000;        //64+64=128(overflow)
+        myalu.b = 8b01000000;        //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b0;
+        aluoutput = myalu.out;        
+        io_led[2] = 8b01000000;
+        io_led[1] = 8b01000000;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1010};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b10000000 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.A_SUB;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b10000000 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.A_ERR;
+        }
+        
+      state.A_SUB:              //Subtraction
+        myalu.a = 8b00100000;   //32-16=16
+        myalu.b = 8b00010000;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b000001;
+        aluoutput = myalu.out;        
+        io_led[2] = 8b00100000;
+        io_led[1] = 8b00010000;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1010};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b00010000 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.A_MULT;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b00010000 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.A_ERR;
+        }
+        
+      state.A_MULT:        //Multiplication
+        myalu.a = 8b10;    //16*2=32
+        myalu.b = 8b10000; //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b000010;
+        aluoutput = myalu.out;        
+        io_led[2] = 8b10;
+        io_led[1] = 8b10000;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1010};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b100000 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.A_ZERO;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b100000 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.A_ERR;
+        }
+        
+      state.A_ZERO:       //Zero test
+        myalu.a = 8b0;    //0+0=0
+        myalu.b = 8b0;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b0;
+        aluoutput = myalu.out;        
+        io_led[2] = 8b0;
+        io_led[1] = 8b0;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1010};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b0 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.A_ERRTEST;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b0 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.A_ERR;
+        }
+        
+      state.A_ERRTEST:    //Adder error test case
+        myalu.a = 8b100;  //4+6=11(ERROR CASE)
+        myalu.b = 8b110;  //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b0;
+        aluoutput = myalu.out+1;    //NOTE: output is simulated to be wrong by adding 1 to it    
+        io_led[2] = 8b100;
+        io_led[1] = 8b110;
+        io_led[0] = myalu.out+1;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1010};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b1010 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_NONE;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b1010 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.A_ERR;
+        }
+        
+      state.A_ERR:          //Adder error state
+        seg.values = {b1100,b1110,b1110,b1010}; //displays ERRA
+        counter.d = counter.q+1;                    //starts counter
+        if (counter.q[DELAY]==1 && io_button[1]==CONTINUE){   //once the MSB of counter becomes 1
+          counter.d = 0;                            //resets counter
+          state.d = state.B_NONE;                   //transitions to boolean automatic testing, end of adder testing
+        } 
+        
+      state.B_NONE:                  //Boolean NONE
+        myalu.a = 8b1010;            //none of the output will be one, so inputs do not matter(inputs can be random value)
+        myalu.b = 8b1100;            //rest of the code is the same as adder testing, just that the alufn is for boolean functions
+        myalu.alufn = 6b010000;
+        aluoutput = myalu.out;
+        io_led[2] = 8b1010;
+        io_led[1] = 8b1100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b0000 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_NOR;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b0000 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_NOR:                //Boolean NOR
+        myalu.a = 8b11111010;     //test for NOR
+        myalu.b = 8b11111100;     //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b010001;
+        aluoutput = myalu.out;
+        io_led[2] = 8b11111010;
+        io_led[1] = 8b11111100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b00000001 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_ANOTB;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b00000001 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_ANOTB:              //Boolean A AND (NOTB)
+        myalu.a = 8b10101010;     //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b010010;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b00100010 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_NOTB;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b00100010 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_NOTB:              //Boolean NOTB
+        myalu.a = 8b10101010;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b010011;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b00110011 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_BNOTA;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b00110011 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_BNOTA:            //Boolean B AND (NOTA)
+        myalu.a = 8b10101010;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b010100;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b01000100 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_NOTA;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b01000100 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_NOTA:              //Boolean NOTA
+        myalu.a = 8b10101010;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b010101;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b01010101 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_XOR;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b01010101 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_XOR:              //Boolean XOR
+        myalu.a = 8b10101010;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b010110;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b01100110 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_NAND;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b01100110 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_NAND:              //Boolean NAND
+        myalu.a = 8b10101010;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b010111;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b01110111 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_AND;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b01110111 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_AND:              //Boolean AND
+        myalu.a = 8b10101010;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011000;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b10001000 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_XNOR;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b10001000 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+
+      state.B_XNOR:            //Boolean XNOR
+        myalu.a = 8b10101010;  //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011001;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b10011001 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_A;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b10011001 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_A:                //Boolean "A"
+        myalu.a = 8b10101010;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011010;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b10101010 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_AORNB;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b10101010 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_AORNB:            //Boolean A OR (NOTB)
+        myalu.a = 8b10101010;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011011;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b10111011 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_B;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b10111011 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_B:                //Boolean "B"
+        myalu.a = 8b10101010;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011100;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11001100 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_BORNA;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11001100 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_BORNA:            //Boolean B OR NOTA
+        myalu.a = 8b10101010;   //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011101;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11011101 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_OR;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11011101 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_OR:                //Boolean OR
+        myalu.a = 8b10101010;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011110;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11101110 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_ALL;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11101110 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_ALL:                //Boolean ALL
+        myalu.a = 8b10101010;     //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;
+        myalu.alufn = 6b011111;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11111111 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.B_ERRTEST;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11111111 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_ERRTEST:            //Boolean Error test
+        myalu.a = 8b10101010;      //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.b = 8b11001100;      
+        myalu.alufn = 6b011111;
+        aluoutput = ~myalu.out;    //output is simulated to be wrong by inverting its values
+        io_led[2] = 8b10101010;
+        io_led[1] = 8b11001100;
+        io_led[0] = ~myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b1000};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11111111 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.S_SL;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11111111 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.B_ERR;
+        }
+        
+      state.B_ERR:        //Boolean Error State
+        seg.values = {b1100,b1110,b1110,b1000};     //displays ERRB
+        counter.d = counter.q+1;                    //start counter
+        if (counter.q[DELAY]==1 && io_button[1]==CONTINUE){     //once MSB of counter becomes 1
+          counter.d = 0;                            //reset counter
+          state.d = state.S_SL;                      //end of boolean testing, transition to shifter testing
+        } 
+        
+      state.S_SL:          //Shifter left shift
+        myalu.a = 8b1111; //8b1111<<4 = 8b11110000
+        myalu.b = 8b100;        //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b100000;
+        aluoutput = myalu.out;
+        io_led[2] = 8b1111;
+        io_led[1] = 8b100;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b0101};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11110000 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.S_SR;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11110000 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.S_ERR;
+        }
+        
+      state.S_SR:              //Shifter right shift
+        myalu.a = 8b10001000; // 8b10001000>>2 = 8b100010
+        myalu.b = 8b10;          //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b100001;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10001000;
+        io_led[1] = 8b10;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b0101};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b100010 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.S_SRA;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b100010 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.S_ERR;
+        } 
+        
+      state.S_SRA:              //Shifter signed right shift
+        myalu.a = 8b10001000; // 8b10001000>>2 = 8b11100010
+        myalu.b = 8b10;        //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b100011;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10001000;
+        io_led[1] = 8b10;
+        io_led[0] = myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b0101};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11100010 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.S_ERRTEST;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11100010 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.S_ERR;
+        } 
+        
+      state.S_ERRTEST:        //Shifter error test case
+        myalu.a = 8b10001000; // 8b10001000>>2 = ~8b11100010(ERROR)
+        myalu.b = 8b10;        //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b100011;
+        aluoutput = ~myalu.out;      //output is inverted to simulate error in output
+        io_led[2] = 8b10001000;
+        io_led[1] = 8b10;
+        io_led[0] = ~myalu.out;
+        seg.values = {4b1101,4b1101,4b1101,4b0101};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b11100010 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_EQ;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b11100010 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.S_ERR;
+        } 
+      
+      state.S_ERR:        //Shifter error state
+        seg.values = {b1100,b1110,b1110,b0101}; //displays ERRS
+        counter.d = counter.q+1;                //starts counter
+        if (counter.q[DELAY] == 1 && io_button[1] == CONTINUE){  //once MSB of counter becomes 1
+          counter.d = 0;                        //resets counter
+          state.d = state.C_EQ;                  //end of shifter testing, moves on to comparator testing
+        }
+        
+      state.C_EQ:              //Comparator equals true
+        myalu.a = 8b10011001; // 8b10011001 == 8b10011001(True)
+        myalu.b = 8b10011001;  //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110011;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10011001;
+        io_led[1] = 8b10011001;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b1 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_EQF;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b1 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        } 
+
+      state.C_EQF:            //Comparator equals false
+        myalu.a = 8b10011001; // 8b10011001 == 8b10011000(False)
+        myalu.b = 8b10011000;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110011;
+        aluoutput = myalu.out;
+        io_led[2] = 8b10011001;
+        io_led[1] = 8b10011000;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b0 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_LT;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b0 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        }
+        
+      state.C_LT:              //Comparator less than true
+        myalu.a = 8b00010000; // 8b00010000 < 8b00011000(True)
+        myalu.b = 8b00011000;  //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110101;
+        aluoutput = myalu.out;
+        io_led[2] = 8b00010000;
+        io_led[1] = 8b00011000;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b1 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_LTF;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b1 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        } 
+        
+      state.C_LTF:            //Comparator less than false
+        myalu.a = 8b01110000; // 8b01110000 < 8b00011000(False)
+        myalu.b = 8b00011000;  //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110101;
+        aluoutput = myalu.out;
+        io_led[2] = 8b01110000;
+        io_led[1] = 8b00011000;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b0 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_LTEQE;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b0 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        }
+        
+      state.C_LTEQE:        //Comparator <= for the case that a=b true
+        myalu.a = 8b1100; // 8b1100 <= 8b1100(True)
+        myalu.b = 8b1100;      //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110111;
+        aluoutput = myalu.out;
+        io_led[2] = 8b1100;
+        io_led[1] = 8b1100;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b1 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_LTEQL;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b1 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        }
+        
+      state.C_LTEQL:      //Comparator <= for the case that a<b true
+        myalu.a = 8b100; // 8b100 <= 8b1100(True)
+        myalu.b = 8b1100;      //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110111;
+        aluoutput = myalu.out;
+        io_led[2] = 8b100;
+        io_led[1] = 8b1100;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b1 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_LTEQF;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b1 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        }
+        
+      state.C_LTEQF:          //Comparator <= false
+        myalu.a = 8b11010; // 8b11010 <= 8b1100(False)
+        myalu.b = 8b1100;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110111;
+        aluoutput = myalu.out;
+        io_led[2] = 8b11010;
+        io_led[1] = 8b1100;
+        io_led[0] = myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b0 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.C_ERRTEST;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b0 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        }
+        
+      state.C_ERRTEST:        //Comparator error test case
+        myalu.a = 8b10011001; // 8b10011001 == 8b10011001(True)
+        myalu.b = 8b10011001;    //the rest of the code is the same as before, just that the inputs and expected output are changed to fit the test case
+        myalu.alufn = 6b110011;
+        aluoutput = ~myalu.out;
+        io_led[2] = 8b10011001;
+        io_led[1] = 8b10011001;
+        io_led[0] = ~myalu.out;
+        led[0] = myalu.n;
+        led[1] = myalu.v;
+        led[2] = myalu.z;
+        seg.values = {4b1101,4b1101,4b1101,4b1011};
+        
+        counter.d = counter.q + 1;
+        if (counter.q[DELAY]==1 && aluoutput==8b1 && io_button[1]==CONTINUE){
+          counter.d = 0;
+          state.d = state.STATEZERO;
+        }
+        else if (counter.q[DELAY]==1 && aluoutput!=8b1 && io_button[1]==CONTINUE){
+          counter.d=0;
+          state.d=state.C_ERR;
+        }
+        
+     state.C_ERR:        //Comparator error state
+        seg.values = {b1100,b1110,b1110,b1011};   //displays ERRC
+        counter.d = counter.q+1;                  //starts counter
+        if (counter.q[DELAY] == 1 && io_button[1] == CONTINUE){      //when MSB of counter becomes 1
+          counter.d = 0;                                //reset counter  
+          state.d = state.STATEZERO;                  //goes back to initial state, end of automatic testing.
+        }
+    }
+  }
+} 
